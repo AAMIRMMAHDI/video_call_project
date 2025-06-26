@@ -47,6 +47,7 @@
         let currentCallId;
 
         peer.on('open', (id) => {
+            console.log('Peer ID generated:', id);
             document.getElementById('myPeerId').textContent = id;
             fetch('/api/register-peer/', {
                 method: 'POST',
@@ -56,17 +57,32 @@
                 },
                 body: JSON.stringify({ peer_id: id })
             }).then(response => {
-                if (!response.ok) console.error('Error registering peer:', response.statusText);
-            });
+                if (!response.ok) {
+                    console.error('Error registering peer:', response.statusText);
+                } else {
+                    console.log('Peer registered successfully');
+                    fetchOnlineUsers();
+                }
+            }).catch(error => console.error('Error registering peer:', error));
 
+            setInterval(fetchOnlineUsers, 2000);
+            setInterval(checkNotifications, 2000);
+            setInterval(checkSignals, 2000);
+        });
+
+        function fetchOnlineUsers() {
             fetch('/api/online-users/', {
                 headers: {
                     'Content-Type': 'application/json',
                     'X-CSRFToken': getCsrfToken()
                 }
             })
-                .then(response => response.json())
+                .then(response => {
+                    if (!response.ok) throw new Error('Failed to fetch users: ' + response.statusText);
+                    return response.json();
+                })
                 .then(data => {
+                    console.log('Online users:', data);
                     const select = document.getElementById('remotePeerId');
                     select.innerHTML = '<option value="">کاربر را انتخاب کنید</option>';
                     data.forEach(peer => {
@@ -77,10 +93,7 @@
                     });
                 })
                 .catch(error => console.error('Error fetching users:', error));
-
-            setInterval(checkNotifications, 2000);
-            setInterval(checkSignals, 2000);
-        });
+        }
 
         async function startCall() {
             const remotePeerId = document.getElementById('remotePeerId').value;
@@ -90,6 +103,33 @@
             }
 
             currentCallId = Date.now().toString();
+            console.log('Starting call with ID:', currentCallId, 'to peer:', remotePeerId);
+
+            const localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+            document.getElementById('localVideo').srcObject = localStream;
+
+            call = peer.call(remotePeerId, localStream);
+            call.on('stream', (remoteStream) => {
+                console.log('Received remote stream');
+                document.getElementById('remoteVideo').srcObject = remoteStream;
+            });
+
+            call.on('signal', (data) => {
+                console.log('Sending signal:', data.type);
+                fetch('/api/send-signal/', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-CSRFToken': getCsrfToken()
+                    },
+                    body: JSON.stringify({
+                        receiver_peer_id: remotePeerId,
+                        type: data.type,
+                        data: data
+                    })
+                }).catch(error => console.error('Error sending signal:', error));
+            });
+
             fetch('/api/send-notification/', {
                 method: 'POST',
                 headers: {
@@ -106,7 +146,7 @@
                 } else {
                     console.error('Error sending notification:', response.statusText);
                 }
-            });
+            }).catch(error => console.error('Error sending notification:', error));
         }
 
         async function checkNotifications() {
@@ -118,6 +158,7 @@
             })
                 .then(response => response.json())
                 .then(notifications => {
+                    console.log('Notifications:', notifications);
                     const notificationList = document.getElementById('notificationList');
                     notificationList.innerHTML = '';
                     notifications.forEach(notification => {
@@ -125,7 +166,7 @@
                         div.className = 'notification';
                         div.innerHTML = `
                             <p>تماس از ${notification.sender_username}</p>
-                            <button onclick="acceptCall('${notification.call_id}', '${notification.sender_username}')">قبول</button>
+                            <button onclick="acceptCall('${notification.call_id}', '${notification.sender_username}', ${notification.id})">قبول</button>
                             <button onclick="rejectCall(${notification.id})">رد</button>
                         `;
                         notificationList.appendChild(div);
@@ -134,7 +175,8 @@
                 .catch(error => console.error('Error fetching notifications:', error));
         }
 
-        async function acceptCall(callId, senderUsername) {
+        async function acceptCall(callId, senderUsername, notificationId) {
+            console.log('Accepting call from:', senderUsername, 'with call ID:', callId);
             fetch('/api/update-notification/', {
                 method: 'POST',
                 headers: {
@@ -142,21 +184,31 @@
                     'X-CSRFToken': getCsrfToken()
                 },
                 body: JSON.stringify({
-                    notification_id: callId,
+                    notification_id: notificationId,
                     status: 'accepted'
                 })
-            });
+            }).catch(error => console.error('Error updating notification:', error));
 
             const localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
             document.getElementById('localVideo').srcObject = localStream;
 
-            const senderPeer = document.querySelector(`#remotePeerId option:not([value=""])`).value;
+            const senderPeer = Array.from(document.querySelectorAll('#remotePeerId option'))
+                .find(option => option.textContent === senderUsername)?.value;
+            if (!senderPeer) {
+                console.error('Sender peer ID not found for username:', senderUsername);
+                alert('کاربر فرستنده یافت نشد');
+                return;
+            }
+
+            console.log('Calling peer:', senderPeer);
             call = peer.call(senderPeer, localStream);
             call.on('stream', (remoteStream) => {
+                console.log('Received remote stream for accepted call');
                 document.getElementById('remoteVideo').srcObject = remoteStream;
             });
 
             call.on('signal', (data) => {
+                console.log('Sending signal for accepted call:', data.type);
                 fetch('/api/send-signal/', {
                     method: 'POST',
                     headers: {
@@ -173,6 +225,7 @@
         }
 
         async function rejectCall(notificationId) {
+            console.log('Rejecting call with notification ID:', notificationId);
             fetch('/api/update-notification/', {
                 method: 'POST',
                 headers: {
@@ -185,7 +238,7 @@
                 })
             }).then(() => {
                 document.getElementById('notificationList').innerHTML = '';
-            });
+            }).catch(error => console.error('Error rejecting notification:', error));
         }
 
         async function checkSignals() {
@@ -195,8 +248,12 @@
                     'X-CSRFToken': getCsrfToken()
                 }
             })
-                .then(response => response.json())
+                .then(response => {
+                    if (!response.ok) throw new Error('Failed to fetch signals: ' + response.statusText);
+                    return response.json();
+                })
                 .then(signals => {
+                    console.log('Received signals:', signals);
                     for (const signal of signals) {
                         if (signal.type === 'offer') {
                             handleOffer(signal.data, signal.sender);
@@ -211,16 +268,19 @@
         }
 
         async function handleOffer(offer, senderPeerId) {
+            console.log('Handling offer from:', senderPeerId);
             const localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
             document.getElementById('localVideo').srcObject = localStream;
 
             call = peer.call(senderPeerId, localStream);
             call.signal(offer);
             call.on('stream', (remoteStream) => {
+                console.log('Received remote stream for offer');
                 document.getElementById('remoteVideo').srcObject = remoteStream;
             });
 
             call.on('signal', (data) => {
+                console.log('Sending signal for offer:', data.type);
                 fetch('/api/send-signal/', {
                     method: 'POST',
                     headers: {
@@ -238,18 +298,25 @@
 
         async function handleAnswer(answer) {
             if (call) {
+                console.log('Handling answer:', answer);
                 call.signal(answer);
+            } else {
+                console.error('No call object to handle answer');
             }
         }
 
         async function handleCandidate(candidate) {
             if (call) {
+                console.log('Handling candidate:', candidate);
                 call.signal(candidate);
+            } else {
+                console.error('No call object to handle candidate');
             }
         }
 
         function endCall() {
             if (call) {
+                console.log('Ending call');
                 call.close();
             }
             document.getElementById('localVideo').srcObject = null;
@@ -257,16 +324,19 @@
         }
 
         peer.on('call', async (incomingCall) => {
+            console.log('Received incoming call');
             call = incomingCall;
             const localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
             document.getElementById('localVideo').srcObject = localStream;
 
             call.answer(localStream);
             call.on('stream', (remoteStream) => {
+                console.log('Received remote stream for incoming call');
                 document.getElementById('remoteVideo').srcObject = remoteStream;
             });
 
             call.on('signal', (data) => {
+                console.log('Sending signal for incoming call:', data.type);
                 fetch('/api/send-signal/', {
                     method: 'POST',
                     headers: {
@@ -280,6 +350,10 @@
                     })
                 }).catch(error => console.error('Error sending signal:', error));
             });
+        });
+
+        peer.on('error', (error) => {
+            console.error('PeerJS error:', error);
         });
     </script>
 </body>
