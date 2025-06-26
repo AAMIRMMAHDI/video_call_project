@@ -15,3 +15,13 @@ class Signal(models.Model):
     type = models.CharField(max_length=20)  # offer, answer, candidate
     data = models.JSONField()
     created_at = models.DateTimeField(auto_now_add=True)
+
+class Notification(models.Model):
+    sender = models.ForeignKey(User, related_name='sent_notifications', on_delete=models.CASCADE)
+    receiver = models.ForeignKey(User, related_name='received_notifications', on_delete=models.CASCADE)
+    call_id = models.CharField(max_length=100)  # برای شناسایی تماس
+    status = models.CharField(max_length=20, default='pending')  # pending, accepted, rejected
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.sender.username} -> {self.receiver.username}: {self.status}"

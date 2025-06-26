@@ -9,6 +9,8 @@
         video { width: 45%; margin: 10px; }
         #myPeerId, #remotePeerId { margin: 10px; }
         button { padding: 10px 20px; margin: 5px; }
+        #notifications { margin: 20px; border: 1px solid #ccc; padding: 10px; }
+        .notification { margin: 10px; padding: 10px; background: #f0f0f0; }
     </style>
 </head>
 <body>
@@ -19,10 +21,14 @@
         <option value="">کاربر را انتخاب کنید</option>
     </select>
     <button onclick="startCall()">شروع تماس</button>
-    <button onclick="endCall()">پایان تماس</button>
+    <button onclick="endCall()">قطع تماس</button>
     <div>
         <video id="localVideo" autoplay muted></video>
         <video id="remoteVideo" autoplay></video>
+    </div>
+    <div id="notifications">
+        <h3>اعلان‌ها</h3>
+        <div id="notificationList"></div>
     </div>
 
     <script>
@@ -38,6 +44,7 @@
             }
         });
         let call;
+        let currentCallId;
 
         peer.on('open', (id) => {
             document.getElementById('myPeerId').textContent = id;
@@ -49,9 +56,7 @@
                 },
                 body: JSON.stringify({ peer_id: id })
             }).then(response => {
-                if (!response.ok) {
-                    console.error('Failed to register peer:', response.status);
-                }
+                if (!response.ok) console.error('Error registering peer:', response.statusText);
             });
 
             fetch('/api/online-users/', {
@@ -73,6 +78,7 @@
                 })
                 .catch(error => console.error('Error fetching users:', error));
 
+            setInterval(checkNotifications, 2000);
             setInterval(checkSignals, 2000);
         });
 
@@ -83,10 +89,69 @@
                 return;
             }
 
+            currentCallId = Date.now().toString();
+            fetch('/api/send-notification/', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRFToken': getCsrfToken()
+                },
+                body: JSON.stringify({
+                    receiver_peer_id: remotePeerId,
+                    call_id: currentCallId
+                })
+            }).then(response => {
+                if (response.ok) {
+                    alert('اعلان تماس ارسال شد. منتظر پاسخ کاربر باشید.');
+                } else {
+                    console.error('Error sending notification:', response.statusText);
+                }
+            });
+        }
+
+        async function checkNotifications() {
+            fetch('/api/get-notifications/', {
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRFToken': getCsrfToken()
+                }
+            })
+                .then(response => response.json())
+                .then(notifications => {
+                    const notificationList = document.getElementById('notificationList');
+                    notificationList.innerHTML = '';
+                    notifications.forEach(notification => {
+                        const div = document.createElement('div');
+                        div.className = 'notification';
+                        div.innerHTML = `
+                            <p>تماس از ${notification.sender_username}</p>
+                            <button onclick="acceptCall('${notification.call_id}', '${notification.sender_username}')">قبول</button>
+                            <button onclick="rejectCall(${notification.id})">رد</button>
+                        `;
+                        notificationList.appendChild(div);
+                    });
+                })
+                .catch(error => console.error('Error fetching notifications:', error));
+        }
+
+        async function acceptCall(callId, senderUsername) {
+            fetch('/api/update-notification/', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRFToken': getCsrfToken()
+                },
+                body: JSON.stringify({
+                    notification_id: callId,
+                    status: 'accepted'
+                })
+            });
+
             const localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
             document.getElementById('localVideo').srcObject = localStream;
 
-            call = peer.call(remotePeerId, localStream);
+            const senderPeer = document.querySelector(`#remotePeerId option:not([value=""])`).value;
+            call = peer.call(senderPeer, localStream);
             call.on('stream', (remoteStream) => {
                 document.getElementById('remoteVideo').srcObject = remoteStream;
             });
@@ -99,11 +164,27 @@
                         'X-CSRFToken': getCsrfToken()
                     },
                     body: JSON.stringify({
-                        receiver_peer_id: remotePeerId,
+                        receiver_peer_id: senderPeer,
                         type: data.type,
                         data: data
                     })
                 }).catch(error => console.error('Error sending signal:', error));
+            });
+        }
+
+        async function rejectCall(notificationId) {
+            fetch('/api/update-notification/', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRFToken': getCsrfToken()
+                },
+                body: JSON.stringify({
+                    notification_id: notificationId,
+                    status: 'rejected'
+                })
+            }).then(() => {
+                document.getElementById('notificationList').innerHTML = '';
             });
         }
 
@@ -151,19 +232,19 @@
                         type: data.type,
                         data: data
                     })
-                });
+                }).catch(error => console.error('Error sending signal:', error));
             });
         }
 
         async function handleAnswer(answer) {
             if (call) {
-                await call.signal(answer);
+                call.signal(answer);
             }
         }
 
         async function handleCandidate(candidate) {
             if (call) {
-                await call.signal(candidate);
+                call.signal(candidate);
             }
         }
 
@@ -197,7 +278,7 @@
                         type: data.type,
                         data: data
                     })
-                });
+                }).catch(error => console.error('Error sending signal:', error));
             });
         });
     </script>
