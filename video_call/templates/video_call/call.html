@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="fa">
+<head>
+    <meta charset="UTF-8">
+    <title>تماس تصویری</title>
+    <script src="https://unpkg.com/peerjs@1.4.7/dist/peerjs.min.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; direction: rtl; text-align: center; }
+        video { width: 45%; margin: 10px; }
+        #myPeerId, #remotePeerId { margin: 10px; }
+        button { padding: 10px 20px; margin: 5px; }
+    </style>
+</head>
+<body>
+    {% csrf_token %}
+    <h1>تماس تصویری</h1>
+    <p>شناسه شما: <span id="myPeerId"></span></p>
+    <select id="remotePeerId">
+        <option value="">کاربر را انتخاب کنید</option>
+    </select>
+    <button onclick="startCall()">شروع تماس</button>
+    <button onclick="endCall()">پایان تماس</button>
+    <div>
+        <video id="localVideo" autoplay muted></video>
+        <video id="remoteVideo" autoplay></video>
+    </div>
+
+    <script>
+        function getCsrfToken() {
+            return document.querySelector('[name=csrfmiddlewaretoken]').value;
+        }
+
+        const peer = new Peer({
+            config: {
+                iceServers: [
+                    { urls: 'stun:stun.l.google.com:19302' }
+                ]
+            }
+        });
+        let call;
+
+        peer.on('open', (id) => {
+            document.getElementById('myPeerId').textContent = id;
+            fetch('/api/register-peer/', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRFToken': getCsrfToken()
+                },
+                body: JSON.stringify({ peer_id: id })
+            }).then(response => {
+                if (!response.ok) {
+                    console.error('Failed to register peer:', response.status);
+                }
+            });
+
+            fetch('/api/online-users/', {
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRFToken': getCsrfToken()
+                }
+            })
+                .then(response => response.json())
+                .then(data => {
+                    const select = document.getElementById('remotePeerId');
+                    select.innerHTML = '<option value="">کاربر را انتخاب کنید</option>';
+                    data.forEach(peer => {
+                        const option = document.createElement('option');
+                        option.value = peer.peer_id;
+                        option.textContent = peer.user__username;
+                        select.appendChild(option);
+                    });
+                })
+                .catch(error => console.error('Error fetching users:', error));
+
+            setInterval(checkSignals, 2000);
+        });
+
+        async function startCall() {
+            const remotePeerId = document.getElementById('remotePeerId').value;
+            if (!remotePeerId) {
+                alert('لطفاً یک کاربر انتخاب کنید');
+                return;
+            }
+
+            const localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+            document.getElementById('localVideo').srcObject = localStream;
+
+            call = peer.call(remotePeerId, localStream);
+            call.on('stream', (remoteStream) => {
+                document.getElementById('remoteVideo').srcObject = remoteStream;
+            });
+
+            call.on('signal', (data) => {
+                fetch('/api/send-signal/', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-CSRFToken': getCsrfToken()
+                    },
+                    body: JSON.stringify({
+                        receiver_peer_id: remotePeerId,
+                        type: data.type,
+                        data: data
+                    })
+                }).catch(error => console.error('Error sending signal:', error));
+            });
+        }
+
+        async function checkSignals() {
+            fetch('/api/get-signals/', {
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRFToken': getCsrfToken()
+                }
+            })
+                .then(response => response.json())
+                .then(signals => {
+                    for (const signal of signals) {
+                        if (signal.type === 'offer') {
+                            handleOffer(signal.data, signal.sender);
+                        } else if (signal.type === 'answer') {
+                            handleAnswer(signal.data);
+                        } else if (signal.type === 'candidate') {
+                            handleCandidate(signal.data);
+                        }
+                    }
+                })
+                .catch(error => console.error('Error fetching signals:', error));
+        }
+
+        async function handleOffer(offer, senderPeerId) {
+            const localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+            document.getElementById('localVideo').srcObject = localStream;
+
+            call = peer.call(senderPeerId, localStream);
+            call.signal(offer);
+            call.on('stream', (remoteStream) => {
+                document.getElementById('remoteVideo').srcObject = remoteStream;
+            });
+
+            call.on('signal', (data) => {
+                fetch('/api/send-signal/', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-CSRFToken': getCsrfToken()
+                    },
+                    body: JSON.stringify({
+                        receiver_peer_id: senderPeerId,
+                        type: data.type,
+                        data: data
+                    })
+                });
+            });
+        }
+
+        async function handleAnswer(answer) {
+            if (call) {
+                await call.signal(answer);
+            }
+        }
+
+        async function handleCandidate(candidate) {
+            if (call) {
+                await call.signal(candidate);
+            }
+        }
+
+        function endCall() {
+            if (call) {
+                call.close();
+            }
+            document.getElementById('localVideo').srcObject = null;
+            document.getElementById('remoteVideo').srcObject = null;
+        }
+
+        peer.on('call', async (incomingCall) => {
+            call = incomingCall;
+            const localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+            document.getElementById('localVideo').srcObject = localStream;
+
+            call.answer(localStream);
+            call.on('stream', (remoteStream) => {
+                document.getElementById('remoteVideo').srcObject = remoteStream;
+            });
+
+            call.on('signal', (data) => {
+                fetch('/api/send-signal/', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-CSRFToken': getCsrfToken()
+                    },
+                    body: JSON.stringify({
+                        receiver_peer_id: call.peer,
+                        type: data.type,
+                        data: data
+                    })
+                });
+            });
+        });
+    </script>
+</body>
+</html>
